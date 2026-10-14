@@ -21,3 +21,5 @@ spring:
 jwt:
   secret: ${JWT_SECRET}
   access-token-expiration: 1800000
+  revocation:
+    strategy: fail-closed

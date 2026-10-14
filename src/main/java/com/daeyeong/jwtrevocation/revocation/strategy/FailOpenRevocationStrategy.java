@@ -2,11 +2,17 @@ package com.daeyeong.jwtrevocation.revocation.strategy;
 
 import com.daeyeong.jwtrevocation.revocation.RedisRevocationStore;
 import lombok.RequiredArgsConstructor;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Component;
 
 @Component
 @RequiredArgsConstructor
+@ConditionalOnProperty(
+        prefix = "jwt.revocation",
+        name = "strategy",
+        havingValue = "fail-open"
+)
 public class FailOpenRevocationStrategy implements RevocationStrategy{
 
     private final RedisRevocationStore redisRevocationStore;
