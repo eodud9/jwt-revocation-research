@@ -64,6 +64,10 @@ public class AuthService {
 
         RevokedToken revokedToken = new RevokedToken(jti, expiresAt, revokedAt);
 
+        if (revokedTokenRepository.existsByJti(jti)) {
+            return;
+        }
+
         revokedTokenRepository.save(revokedToken);
 
         Duration ttl = Duration.between(

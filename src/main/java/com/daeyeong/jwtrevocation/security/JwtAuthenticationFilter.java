@@ -1,5 +1,6 @@
 package com.daeyeong.jwtrevocation.security;
 
+import com.daeyeong.jwtrevocation.revocation.strategy.RevocationStrategy;
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -12,15 +13,14 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.net.http.HttpRequest;
 import java.util.Collections;
-import java.util.List;
 
 @Component
 @RequiredArgsConstructor
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final JwtProvider jwtProvider;
+    private final RevocationStrategy revocationStrategy;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
@@ -38,6 +38,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
                 Claims claims = jwtProvider.parseClaims(token);
                 String userId = claims.getSubject();
+                String jti = claims.getId();
+
+                if(revocationStrategy.isRevoked(jti)){
+                    filterChain.doFilter(request, response);
+                    return;
+                }
 
                 UsernamePasswordAuthenticationToken usernamePasswordAuthenticationToken = new UsernamePasswordAuthenticationToken(
                         userId,
