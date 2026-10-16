@@ -25,6 +25,7 @@ public class SecurityConfig {
                 .authorizeHttpRequests(
                         auth -> auth
                                 .requestMatchers(HttpMethod.POST, "/auth/login").permitAll()
+                                .requestMatchers("/api/experiment/**").permitAll()
                                 .anyRequest().authenticated()
                 )
                 .build();
