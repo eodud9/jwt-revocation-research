@@ -166,12 +166,17 @@ Redis 중심의 검증 전략보다 응답시간이 증가하고 처리량이 �
 
 높을수록 가용성 측면에서 바람직하다.
 
-### 성능 지표
+### 성능 및 보조 지표
 
 -   Average Latency
 -   P95 Latency
 -   Throughput
--   필요 시 Error Rate 및 DB Query Count
+-   Error Rate
+-   DB Query Count
+
+E1과 E4에서는 성능 지표를 중심으로 분석하고, E2와 E3에서는 RTAR/VTSR 등
+인증 결과 지표를 중심으로 분석한다. DB Query Count는 S3와 S4의 실제 실행
+경로를 확인하기 위한 보조 지표로 활용한다.
 
 ## 9. 변수
 
@@ -179,7 +184,7 @@ Redis 중심의 검증 전략보다 응답시간이 증가하고 처리량이 �
 
 -   인증/폐기 검증 전략: Stateless, S1, S2, S3, S4
 -   시스템 상태: Normal, Redis Failure, Redis-MySQL Inconsistency
--   부하 수준: 예비실험 후 Low / Medium / High 또는 구체적인 VU로 결정
+-   부하 수준: 20 VU, 50 VU, 100 VU
 
 ### 종속변수
 
@@ -188,7 +193,8 @@ Redis 중심의 검증 전략보다 응답시간이 증가하고 처리량이 �
 -   Average Latency
 -   P95 Latency
 -   Throughput
--   필요 시 Error Rate 및 DB Query Count
+-   Error Rate
+-   DB Query Count
 
 ### 통제변수
 
@@ -201,6 +207,7 @@ Redis 중심의 검증 전략보다 응답시간이 증가하고 처리량이 �
 -   동일한 보호 API
 -   동일한 요청 데이터와 부하 조건
 -   동일한 네트워크 환경
+-   성능 실험 중 불필요한 애플리케이션 및 사용자 작업 최소화
 
 ## 10. 연구 범위
 
@@ -217,23 +224,18 @@ Redis 중심의 검증 전략보다 응답시간이 증가하고 처리량이 �
 -   복잡한 마이크로서비스 구조
 -   대규모 실제 운영 환경 재현
 
-## 11. 현재 확정 및 미확정 사항
+## 11. 최종 실험 조건
 
-### 확정
+예비실험을 바탕으로 다음 조건을 고정한다.
 
--   MySQL을 Source of Truth로 사용
--   Redis를 빠른 폐기 검증 저장소로 사용
--   `jti` 단위 Access Token 폐기
--   MySQL → Redis 저장 순서
--   S1\~S4 비교 전략
--   Stateless JWT 성능 Baseline
--   RQ1\~RQ4 및 H1\~H4
--   RTAR, VTSR 및 성능 지표
--   Redis 장애와 Redis-MySQL 상태 불일치를 별개의 실패 상태로 구분
-
-### 예비실험 후 결정
-
--   구체적인 VU 및 부하 수준
--   요청 지속시간/총 요청 수
--   본실험 반복 횟수
--   통계 분석 방법과 신뢰구간 제시 방식
+-   성능 부하 수준: 20 VU / 50 VU / 100 VU
+-   E1/E4 측정 지속시간: 각 Run 30초
+-   E1/E4 반복 횟수: 조건별 5회
+-   E1/E4 Warm-up: 5 VU / 20초
+-   Warm-up 이후 대기: 30초
+-   반복 Run 사이 대기: 30초
+-   E2: 1 VU / 100 iterations, Valid Token 100회 + Revoked Token 100회
+-   E3: 1 VU / 100 iterations, Revoked Token 100회
+-   E1/E4는 반복 결과의 평균과 표준편차를 기본적으로 제시하고 필요 시
+    95% 신뢰구간을 함께 검토한다.
+-   Pilot 결과와 Final 결과는 분리하여 관리한다.

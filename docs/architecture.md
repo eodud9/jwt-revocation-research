@@ -24,19 +24,21 @@
 
 ``` text
 Client / k6
-     |
-     v
+    |
+    v
 Spring Boot
-     |
-     +--> Spring Security / JWT Filter
-     |          |
-     |          +--> RevocationStrategy
-     |                    |
-     |                    +--> Redis
-     |                    |
-     |                    +--> MySQL
-     |
-     +--> Protected API
+    |
+    +--> Spring Security / JWT Filter
+    |          |
+    |          +--> RevocationStrategy
+    |                    |
+    |                    +--> Redis
+    |                    |
+    |                    +--> MySQL
+    |
+    +--> Protected API
+    |
+    +--> Experiment Metrics API
 ```
 
 MySQL은 폐기 상태의 Source of Truth로, Redis는 빠른 폐기 검증을 위한
@@ -70,12 +72,6 @@ RevokedToken
 -   `RevokedToken` 테이블에 해당 `jti`가 존재한다는 것 자체가 폐기
     상태를 의미한다.
 
-예시:
-
-    id jti       revoked_at         expires_at
-  ---- --------- ------------------ ------------------
-     1 abc-123   2026-10-12 15:30   2026-10-12 16:00
-
 ## 5. JWT 구조
 
 Access Token에는 최소한 다음 Claim을 포함한다.
@@ -100,31 +96,22 @@ Access Token에는 최소한 다음 Claim을 포함한다.
 String jti = UUID.randomUUID().toString();
 ```
 
-따라서 동일 사용자가 여러 번 로그인하더라도 각각의 Access Token을
-독립적으로 폐기할 수 있다.
-
 ## 6. Redis 구조
 
 ### Key
 
 `revoked:{jti}`
 
-예:
-
-`revoked:550e8400-e29b-41d4-a716-446655440000`
-
 ### Value
 
-단순 존재 여부만 필요하므로 `"1"`과 같은 값을 사용할 수 있다.
+폐기 여부는 키 존재 여부로 판단하므로 값은 `"1"`을 사용한다.
 
 ### TTL
-
-Redis 폐기 키의 TTL은 JWT의 남은 유효시간과 동일하게 설정한다.
 
 `TTL = JWT expiresAt - 현재 시각`
 
 JWT가 만료된 이후에는 자체 만료 검증에서 거부되므로 Redis에 폐기 정보를
-계속 보관할 필요가 없다.
+계속 보관하지 않는다.
 
 ## 7. API
 
@@ -132,30 +119,9 @@ JWT가 만료된 이후에는 자체 만료 검증에서 거부되므로 Redis�
 
 `POST /auth/login`
 
-요청 예시:
-
-``` json
-{
-  "email": "test@test.com",
-  "password": "1234"
-}
-```
-
-응답 예시:
-
-``` json
-{
-  "accessToken": "eyJ..."
-}
-```
-
 ### 로그아웃
 
 `POST /auth/logout`
-
-Header:
-
-`Authorization: Bearer {accessToken}`
 
 현재 Access Token의 `jti`, `exp`를 추출하여 MySQL과 Redis에 폐기 정보를
 저장한다.
@@ -164,20 +130,22 @@ Header:
 
 `GET /api/protected`
 
-Header:
+`/api/protected`는 JWT 인증 및 폐기 전략을 동일한 조건에서 테스트하기
+위한 최소 보호 Endpoint이다.
 
-`Authorization: Bearer {accessToken}`
+### 실험 Metrics API
 
-응답 예시:
+`POST /api/experiment/metrics/reset`
 
-``` json
-{
-  "message": "success"
-}
-```
+DB Query Count를 0으로 초기화한다.
 
-`/api/protected`는 별도의 비즈니스 의미를 가지는 API가 아니라 JWT 인증
-및 폐기 전략을 동일한 조건에서 테스트하기 위한 최소 보호 Endpoint이다.
+`GET /api/experiment/metrics`
+
+현재 DB Query Count를 반환한다.
+
+Metrics Endpoint는 JWT 인증 Filter의 실험 대상 요청에 포함되지 않도록
+`shouldNotFilter()`에서 제외하며, Security 설정에서도 실험용 Endpoint
+접근을 허용한다.
 
 ## 8. 로그아웃 저장 흐름
 
@@ -185,24 +153,24 @@ Header:
 
 ``` text
 POST /auth/logout
-       |
-       v
+      |
+      v
 JWT 검증
-       |
-       v
+      |
+      v
 jti / exp 추출
-       |
-       v
+      |
+      v
 MySQL
 RevokedToken INSERT
-       |
-       | 성공
-       v
+      |
+      | 성공
+      v
 Redis
 SET revoked:{jti}
 TTL = JWT 남은 수명
-       |
-       v
+      |
+      v
 Logout 완료
 ```
 
@@ -218,40 +186,36 @@ ABC = revoked      ABC = MISS
 
 ## 9. 공통 인증 흐름
 
-모든 전략은 다음 공통 처리 과정을 사용한다.
-
 ``` text
 Request
-   |
-   v
+  |
+  v
 Bearer Token 추출
-   |
-   v
+  |
+  v
 JWT 서명 검증
-   |
-   v
+  |
+  v
 만료시간 검증
-   |
-   v
+  |
+  v
 jti 추출
-   |
-   v
+  |
+  v
 RevocationStrategy
-   |
-   +--> 폐기됨    -> 요청 거부
-   |
-   +--> 폐기 아님 -> SecurityContext 설정
-                         |
-                         v
-                  Protected API
+  |
+  +--> 폐기됨    -> 요청 거부
+  |
+  +--> 폐기 아님 -> SecurityContext 설정
+                        |
+                        v
+                 Protected API
 ```
 
 전략 간 차이는 폐기 여부를 판단하는 부분에만 두어 다른 인증 로직을
 동일하게 유지한다.
 
 ## 10. RevocationStrategy
-
-공통 인터페이스 예시:
 
 ``` java
 public interface RevocationStrategy {
@@ -262,16 +226,27 @@ public interface RevocationStrategy {
 구현체:
 
 ``` text
+StatelessRevocationStrategy
 FailOpenRevocationStrategy
 FailClosedRevocationStrategy
 DbFallbackRevocationStrategy
 DbVerificationRevocationStrategy
 ```
 
-Redis 접근 세부 구현은 `RedisRevocationStore`와 같은 별도 컴포넌트로
-분리할 수 있다.
+각 구현체는 `@ConditionalOnProperty`를 이용해 설정값에 따라 하나의 전략
+Bean이 활성화되도록 구성한다.
 
 예:
+
+``` java
+@ConditionalOnProperty(
+    prefix = "jwt.revocation",
+    name = "strategy",
+    havingValue = "stateless"
+)
+```
+
+Redis 접근은 `RedisRevocationStore`로 분리한다.
 
 ``` java
 @Component
@@ -288,125 +263,115 @@ public class RedisRevocationStore {
 }
 ```
 
-`redisHasKey()`와 같은 표현은 설계 설명을 위한 의사 메서드이며
-Spring/Redis의 실제 기본 메서드명이 아니다. 실제 구현에서는
-`StringRedisTemplate.hasKey()` 등을 사용한다.
-
 ## 11. S1 --- Fail-Open
 
 ``` text
 Redis 정상
-  |
-  +--> HIT  -> revoked
-  |
-  +--> MISS -> not revoked
+ |
+ +--> HIT  -> revoked
+ |
+ +--> MISS -> not revoked
 
-Redis 연결 실패
-  |
-  v
+Redis 접근 실패
+ |
+ v
 not revoked로 판단
 ```
 
-개념적 의사코드:
-
-``` java
-try {
-    return redisRevocationStore.isRevoked(jti);
-} catch (RedisConnectionFailureException e) {
-    return false;
-}
-```
+Redis 접근 과정에서 발생한 `DataAccessException`을 장애 경로로 처리하여
+요청을 허용한다.
 
 ## 12. S2 --- Fail-Closed
 
 ``` text
 Redis 정상
-  |
-  +--> HIT  -> revoked
-  |
-  +--> MISS -> not revoked
+ |
+ +--> HIT  -> revoked
+ |
+ +--> MISS -> not revoked
 
-Redis 연결 실패
-  |
-  v
-요청 거부
+Redis 접근 실패
+ |
+ v
+revoked로 판단하여 요청 거부
 ```
-
-개념적으로는 연결 실패 시 폐기 검증에 실패한 요청을 허용하지 않는다.
-실제 구현에서는 실제 폐기 상태와 정책상 거부를 별도 예외로 구분할 수
-있다.
 
 ## 13. S3 --- DB Fallback
 
 ``` text
 Redis 정상
-  |
-  +--> HIT  -> 거부
-  |
-  +--> MISS -> 허용
+ |
+ +--> HIT  -> 거부
+ |
+ +--> MISS -> 허용
 
-Redis 연결 실패
-  |
-  v
+Redis 접근 실패
+ |
+ v
 MySQL existsByJti(jti)
-  |
-  +--> 존재 -> 거부
-  |
-  +--> 없음 -> 허용
+ |
+ +--> 존재 -> 거부
+ |
+ +--> 없음 -> 허용
 ```
 
 Redis가 정상적으로 `MISS`를 반환하는 경우에는 DB를 조회하지 않는다.
+Redis 접근 실패 시에만 DB Query Count를 증가시키고 MySQL을 조회한다.
 
 ## 14. S4 --- DB Verification
 
 ``` text
 Redis HIT
-  |
-  v
+ |
+ v
 거부
 
 Redis MISS
-  |
-  v
+ |
+ v
 MySQL 조회
-  |
-  +--> 존재 -> 거부
-  |
-  +--> 없음 -> 허용
+ |
+ +--> 존재 -> 거부
+ |
+ +--> 없음 -> 허용
 
-Redis 연결 실패
-  |
-  v
+Redis 접근 실패
+ |
+ v
 MySQL 조회
 ```
 
 따라서 `MySQL=revoked`, `Redis=MISS`인 상태에서도 폐기 토큰을 탐지할 수
-있다.
+있다. Redis MISS 또는 Redis 접근 실패 후 MySQL을 조회할 때 DB Query
+Count를 증가시킨다.
 
 ## 15. Stateless Baseline
 
-E1의 기준선으로 다음 흐름을 사용한다.
-
 ``` text
 Request
-   |
-   v
+  |
+  v
 JWT 서명 검증
-   |
-   v
+  |
+  v
 만료시간 검증
-   |
-   v
+  |
+  v
+StatelessRevocationStrategy
+  |
+  v
+항상 not revoked
+  |
+  v
 Authentication
 ```
 
+`StatelessRevocationStrategy.isRevoked()`는 항상 `false`를 반환하며
 Redis 및 MySQL 폐기 조회를 수행하지 않는다.
 
 ## 16. 전략 전환
 
-동일한 코드베이스에서 설정값으로 전략을 전환하는 구조를 사용한다.
-
-예:
+동일한 코드베이스에서 설정값으로 전략을 전환한다.
 
 ``` yaml
 jwt:
@@ -414,7 +379,7 @@ jwt:
     strategy: fail-open
 ```
 
-후보 값:
+지원 값:
 
 ``` text
 stateless
@@ -424,14 +389,40 @@ db-fallback
 db-verification
 ```
 
-Spring의 조건부 Bean 등록 또는 Factory 패턴 등을 이용할 수 있다.
-구체적인 구현 방식은 실제 코드 구조에 맞추어 결정한다.
+전략 변경 후에는 Spring Boot를 재시작하여 해당 조건부 Bean이
+활성화되도록 한다.
 
-## 17. 장애 및 불일치 재현
+## 17. 실험 Metrics
+
+DB Verification과 DB Fallback의 DB 접근 경로를 확인하기 위해
+`RevocationMetrics`를 둔다.
+
+``` java
+@Component
+public class RevocationMetrics {
+
+    private final AtomicLong dbQueryCount = new AtomicLong(0);
+
+    public void incrementDbQueryCount() {
+        dbQueryCount.incrementAndGet();
+    }
+
+    public long getDbQueryCount() {
+        return dbQueryCount.get();
+    }
+
+    public void reset() {
+        dbQueryCount.set(0);
+    }
+}
+```
+
+Metrics는 연구용 보조 계측이며 상용 모니터링 시스템을 구현하려는 목적이
+아니다.
+
+## 18. 장애 및 불일치 재현
 
 ### Redis 장애
-
-Docker Compose 환경에서 Redis 컨테이너만 중단한다.
 
 ``` bash
 docker compose stop redis
@@ -443,82 +434,115 @@ docker compose stop redis
 docker compose start redis
 ```
 
+MySQL과 Spring Boot는 정상 상태를 유지한다.
+
 ### Redis-MySQL 불일치
 
 1.  토큰을 정상 로그아웃하여 MySQL과 Redis에 폐기 정보를 저장한다.
 2.  MySQL 기록은 유지한다.
-3.  Redis의 해당 폐기 키만 삭제한다.
+3.  Redis의 폐기 정보를 제거한다.
+4.  Redis 서버 자체는 정상 상태로 유지한다.
 
 개념적으로:
-
-``` text
-DEL revoked:{jti}
-```
-
-결과:
 
 ``` text
 MySQL              Redis
 jti = revoked      MISS
 ```
 
-이는 실제 모든 불일치를 재현하는 것이 아니라 DB 저장 성공 후 Redis 반영
-실패로 발생할 수 있는 상태를 통제된 방식으로 모사한다.
+특정 키를 삭제하거나 연구 전용 Redis DB에서 `FLUSHDB`를 사용하는
+방식으로 통제된 불일치 상태를 구성할 수 있으며, 최종 실험에서는 실제
+사용한 방식을 기록한다.
 
-## 18. 권장 패키지 구조
+## 19. 패키지 구조
 
 ``` text
-src/main/java/...
+src/main/java/com/daeyeong/jwtrevocation/
 
 auth/
- ├── AuthController
- ├── AuthService
- ├── LoginRequest
- └── TokenResponse
+├── AuthController
+├── AuthService
+├── LoginRequest
+└── TokenResponse
 
 security/
- ├── JwtProvider
- ├── JwtAuthenticationFilter
- └── SecurityConfig
+├── JwtProvider
+├── JwtAuthenticationFilter
+└── SecurityConfig
 
 revocation/
- ├── RevokedToken
- ├── RevokedTokenRepository
- ├── RedisRevocationStore
- ├── RevocationStrategy
- ├── FailOpenRevocationStrategy
- ├── FailClosedRevocationStrategy
- ├── DbFallbackRevocationStrategy
- └── DbVerificationRevocationStrategy
+├── RevokedToken
+├── RevokedTokenRepository
+├── RedisRevocationStore
+├── RevocationMetrics
+└── strategy/
+    ├── RevocationStrategy
+    ├── StatelessRevocationStrategy
+    ├── FailOpenRevocationStrategy
+    ├── FailClosedRevocationStrategy
+    ├── DbFallbackRevocationStrategy
+    └── DbVerificationRevocationStrategy
 
 user/
- ├── User
- └── UserRepository
+├── User
+└── UserRepository
 
 api/
- └── ProtectedController
+├── ProtectedController
+└── ExperimentMetricsController
 ```
 
-## 19. 구현 순서
+실제 클래스 배치가 위 예시와 다른 경우 최종 논문 작성 전 실제 코드
+구조와 일치하도록 갱신한다.
 
-1.  `User`, `RevokedToken` 엔티티 및 Repository
-2.  JWT 발급 및 `jti` 생성
-3.  로그인 API
-4.  기본 JWT 인증 Filter
-5.  `/api/protected`
-6.  Redis 폐기 저장/조회
-7.  로그아웃의 MySQL → Redis 저장
-8.  `RevocationStrategy` 인터페이스
-9.  S1\~S4 구현
-10. 설정 기반 전략 전환
-11. Docker Compose로 MySQL/Redis 환경 통일
-12. k6 실험 스크립트 작성
+## 20. 실험 스크립트 구조
 
-## 20. 구현 시 주의사항
+``` text
+experiments/k6/
+├── warm-up.js
+├── e1-performance.js
+├── run-e1-stateless.sh
+├── run-e1-redis.sh
+├── e2-availability.js
+├── run-e2.sh
+├── e3-consistency.js
+├── run-e3.sh
+├── e4-performance.js
+├── run-e4-s3.sh
+├── run-e4-s4.sh
+└── results/
+    ├── e1/
+    ├── e2/
+    ├── e3/
+    └── e4/
+```
+
+E1/E4는 성능 실험이므로 Warm-up과 반복 측정을 사용한다. E2/E3는 인증
+판단 결과를 측정하므로 1 VU / 100 iterations로 수행하고 별도의 Warm-up을
+적용하지 않는다.
+
+## 21. 구현 상태 및 주의사항
+
+현재 최소 실험 시스템에는 다음 기능이 구현되어 있다.
+
+-   Stateless JWT 인증 Baseline
+-   Redis 기반 폐기 저장/조회
+-   MySQL → Redis 로그아웃 저장
+-   S1 Fail-Open
+-   S2 Fail-Closed
+-   S3 DB Fallback
+-   S4 DB Verification
+-   설정 기반 전략 전환
+-   DB Query Count 계측
+-   k6 E1\~E4 실험 스크립트
+
+구현 및 실험 시 다음 사항을 유지한다.
 
 -   `/api/protected`는 연구용 보호 Endpoint로 통일한다.
 -   `/auth/login`은 인증 없이 접근 가능해야 한다.
 -   `/auth/logout`은 Access Token을 필요로 한다.
+-   `/api/experiment/**`는 실험 계측용 Endpoint이며 인증 성능 측정
+    경로에서 제외한다.
 -   로그아웃 멱등성 자체는 본 연구의 핵심 대상이 아니므로 과도하게
     범위를 확장하지 않는다.
 -   전략 외의 인증 처리 로직은 최대한 동일하게 유지하여 실험의 통제성을
