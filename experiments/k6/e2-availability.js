@@ -26,10 +26,12 @@ export default function (){
 
     const revokedResponse = http.get(
 
-            'http://localhost:8080/api/protected'
-            headers: {
-                Authorization: `Bearer ${revokedToken}`,
-            },
+            'http://localhost:8080/api/protected',
+            {
+               headers: {
+                           Authorization: `Bearer ${revokedToken}`,
+               },
+            }
         );
 
     check(validResponse, {

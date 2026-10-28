@@ -19,8 +19,9 @@ export default function(){
         }
     );
 
-    check(response,
-    'status is 200': (r) => r.status === 200,
+    check(response,{
+        'status is 200': (r) => r.status === 200,
+    }
     );
 
 }
