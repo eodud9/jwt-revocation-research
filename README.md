@@ -69,7 +69,7 @@ Spring Boot 애플리케이션과 k6 부하 생성기가 같은 호스트에서 
 1. 예제 환경변수 파일을 복사하고 **직접 생성한 비밀값**을 입력합니다.
 
    ```bash
-   cp .env.example .env
+   cp ..env.example .env
    # .env의 MYSQL_ROOT_PASSWORD, JWT_SECRET 수정
    ```
 
