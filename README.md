@@ -1,245 +1,135 @@
 # JWT Revocation Research
 
-Redis 기반 JWT 폐기 검증 시스템에서 데이터 일관성 및 장애 대응 전략을 비교하기 위한 실험 프로젝트입니다.
+**Redis 기반 JWT 폐기 검증에서 장애 대응과 데이터 일관성의 트레이드오프를 비교한 실험 연구**
 
-JWT Access Token을 즉시 폐기하기 위해 Redis Denylist를 사용하는 환경에서 다음 두 가지 문제에 초점을 맞춥니다.
+JWT Access Token을 만료 전에 폐기하기 위해 MySQL을 폐기 정보의 기준 저장소(Source of Truth), Redis를 조회용 Denylist로 사용하는 최소 Spring Boot 시스템을 구현했습니다. **Redis 연결 장애(E2)**와 **Redis가 정상 동작하지만 폐기 키가 누락된 불일치(E3)**를 구분하고, 네 가지 전략의 인증 판단 및 성능 비용을 비교했습니다.
 
-- Redis 장애로 인해 폐기 여부를 조회할 수 없는 상황
-- Redis는 정상 동작하지만 MySQL과 Redis의 폐기 상태가 불일치하는 상황
+> 연구 범위: JWT Access Token 폐기 검증. 새로운 암호 알고리즘, 분산 트랜잭션, 자동 복구 프로토콜을 제안하는 프로젝트는 아닙니다.
 
-각 상황에서 서로 다른 폐기 검증 전략을 적용하고 보안성, 가용성 및 성능의 차이를 실험적으로 비교합니다.
+## 핵심 결과
 
----
+| 실험 | 조건 | 주요 관찰 |
+|---|---|---|
+| E1 | Stateless vs Redis Denylist, 20/50/100 VU | Redis 조회 조건의 처리량이 각각 **56.3% / 48.6% / 45.0% 감소** |
+| E2 | Redis 연결 중단, 정상·폐기 토큰 각 100회 | Fail-Open: VTSR 100%, RTAR 100%; Fail-Closed: 0%, 0%; DB Fallback: 100%, 0% |
+| E3 | MySQL 폐기 기록 유지, Redis 키 누락, 폐기 토큰 100회 | S1~S3 RTAR 100%, S4 DB Verification RTAR 0%; S4 DB 조회 100회 |
+| E4 | DB Fallback vs DB Verification, 20/50/100 VU | S4 처리량이 각각 **59.5% / 63.4% / 62.2% 감소** |
 
-## Research Questions
+**해석:** Redis가 응답하지 않는 장애와 Redis가 정상적으로 `MISS`를 반환하는 데이터 불일치는 서로 다른 문제입니다. DB Fallback은 전자에 대응하지만 후자를 검출하지 못합니다. DB Verification은 후자를 검출하는 대신 정상 요청에서도 DB 조회 비용을 발생시킵니다. 수치는 단일 로컬 실험환경에서의 관찰값이며 운영환경 성능을 일반화하지 않습니다.
 
-본 연구에서는 다음 네 가지 연구 질문을 다룹니다.
+자세한 수치와 실험 조건: [실험 결과](docs/experiment-results.md) · [실험 설계](docs/experiment-design.md)
 
-**RQ1.** Redis Denylist를 이용한 JWT 폐기 검증은 Stateless JWT 인증과 비교하여 인증 처리 성능에 어떠한 영향을 미치는가?
+## 비교 전략
 
-**RQ2.** Redis 장애 상황에서 Fail-Open, Fail-Closed 및 DB Fallback 전략은 인증 시스템의 보안성과 가용성에 어떠한 차이를 발생시키는가?
+| 전략 | Redis HIT | Redis MISS | Redis 접근 중 `DataAccessException` |
+|---|---|---|---|
+| Stateless 기준선 | 조회하지 않음 | 조회하지 않음 | 해당 없음 |
+| S1 Fail-Open | 거부 | 허용 | 허용 |
+| S2 Fail-Closed | 거부 | 허용 | 거부 |
+| S3 DB Fallback | 거부 | 허용 | MySQL에서 `jti` 조회 |
+| S4 DB Verification | 거부 | MySQL에서 `jti` 조회 | MySQL에서 `jti` 조회 |
 
-**RQ3.** Redis와 MySQL 간 JWT 폐기 정보가 불일치하는 상황에서 DB Verification 전략은 기존 장애 대응 전략보다 폐기 토큰의 오허용을 효과적으로 감소시키는가?
+표의 '허용'은 JWT 서명·만료 검증을 통과했다는 전제에서 폐기 검증 전략이 요청을 통과시킨다는 뜻입니다. 코드가 명시적으로 처리하는 Redis 예외는 `DataAccessException`이며, 모든 종류의 장애를 포괄하는 것은 아닙니다.
 
-**RQ4.** DB Verification을 통한 폐기 상태 검증 강화는 정상 및 고부하 환경에서 어느 정도의 성능 비용을 발생시키는가?
-
----
-
-## Revocation Strategies
-
-### Stateless Baseline
-
-JWT의 서명과 만료시간만 검증하며 Redis와 MySQL의 폐기 정보를 조회하지 않습니다.
-
-### S1. Fail-Open
-
-Redis가 정상일 때 Denylist를 조회하고, Redis 접근에 실패하면 요청을 허용합니다.
-
-### S2. Fail-Closed
-
-Redis가 정상일 때 Denylist를 조회하고, Redis 접근에 실패하면 요청을 거부합니다.
-
-### S3. DB Fallback
-
-Redis 접근에 실패한 경우 MySQL에서 `jti`의 폐기 여부를 확인합니다.
-
-```text
-Redis HIT     → Reject
-Redis MISS    → Allow
-Redis Failure → MySQL Verification
-```
-
-### S4. DB Verification
-
-Redis가 `MISS`를 반환하거나 Redis 접근에 실패하면 MySQL에서 폐기 여부를 추가 확인합니다.
-
-```text
-Redis HIT     → Reject
-Redis MISS    → MySQL Verification
-Redis Failure → MySQL Verification
-```
-
----
-
-## Architecture
+## 아키텍처
 
 ```text
 Client / k6
-      |
-      v
-Spring Boot
-      |
-      v
+    |
 Spring Security / JWT Filter
-      |
-      v
+    |
 RevocationStrategy
-   |          |
-   v          v
- Redis      MySQL
-              |
-              v
-      Source of Truth
+    |-- Redis: revoked:{jti} (TTL = 토큰 잔여 유효기간)
+    `-- MySQL: revoked_tokens (기준 저장소)
 ```
 
-MySQL을 JWT 폐기 상태의 **Source of Truth**로 사용하고, Redis를 빠른 폐기 검증을 위한 보조 저장소로 사용합니다.
+- Access Token: HS256, 30분 만료, UUID `jti`
+- 로그아웃 저장 순서: **MySQL → Redis** (원자적 저장 아님)
+- MySQL 저장 후 Redis 반영 실패 시 불일치가 남을 수 있음
+- 기존 `jti`가 MySQL에 존재하면 현재 로그아웃 구현은 조기 반환하므로, 재호출만으로 누락된 Redis 키를 복원하지 못할 수 있음
 
-로그아웃 시 폐기 정보는 다음 순서로 저장합니다.
+상세 구현: [아키텍처 문서](docs/architecture.md)
 
-```text
-MySQL → Redis
-```
+## 기술 스택과 실험환경
 
-Redis에는 다음 형식으로 폐기된 Access Token의 `jti`를 저장합니다.
+- Java 21, Spring Boot 4.1.1, Spring Security, Spring Data JPA, JWT
+- MySQL 8.4, Redis 7.4, Docker Compose, k6 2.3.0
+- MacBook Air / Apple M1(8코어) / RAM 8GB / macOS 15.6.1
+- Docker Desktop 할당: CPU 8개, 메모리 4GB, Swap 1GB
+- JVM 관측값: 초기 Heap 128MiB, 최대 Heap 2GiB, G1GC (별도 `-Xms`/`-Xmx` 지정 없음)
+- MySQL: `max_connections=151`, InnoDB Buffer Pool 128MiB
+- Redis: `maxclients=10000`, `maxmemory=0` (Redis 자체 메모리 상한 미설정)
 
-```text
-Key   : revoked:{jti}
-Value : "1"
-TTL   : Access Token의 남은 유효시간
-```
+Spring Boot 애플리케이션과 k6 부하 생성기가 같은 호스트에서 실행되어 결과에 호스트 자원 경쟁의 영향이 포함될 수 있습니다. 환경 세부값은 실험 종료 후 변경 없이 확인한 값입니다.
 
----
+## 로컬 실행
 
-## Experiments
+사전 준비: **JDK 21, Docker Desktop, k6**. 명령어는 프로젝트 루트 기준입니다.
 
-| Experiment | System State | Comparison | Main Metrics |
-|---|---|---|---|
-| E1 | Normal | Stateless vs Redis Denylist | Avg, P95, Throughput |
-| E2 | Redis Failure | S1 vs S2 vs S3 | RTAR, VTSR |
-| E3 | Redis-MySQL Inconsistency | S1 vs S2 vs S3 vs S4 | RTAR, DB Query Count |
-| E4 | Normal / Load Increase | S3 vs S4 | Avg, P95, Throughput, DB Query Count |
+1. 예제 환경변수 파일을 복사하고 **직접 생성한 비밀값**을 입력합니다.
 
-### Performance Test Configuration
+   ```bash
+   cp .env.example .env
+   # .env의 MYSQL_ROOT_PASSWORD, JWT_SECRET 수정
+   ```
 
-E1과 E4는 다음 조건으로 성능을 측정합니다.
+2. Compose 및 Spring Boot 실행. Compose는 `.env`를 읽지만, **Spring Boot를 IDE/터미널에서 별도로 실행할 때는 환경변수를 별도 전달**해야 합니다.
 
-```text
-Load       : 20 / 50 / 100 VU
-Duration   : 30 seconds per run
-Repetition : 5 runs per condition
-Warm-up    : 5 VU / 20 seconds
-Rest       : 30 seconds
-```
+   ```bash
+   docker compose up -d
+   set -a; source .env; set +a
+   ./gradlew bootRun
+   ```
 
-E2와 E3는 성능 부하 테스트가 아니라 장애 및 불일치 상황에서의 인증 결과를 측정합니다.
+   `application.yaml`은 MySQL `localhost:3307`, Redis `localhost:6380`, HTTP `localhost:8080`을 사용합니다. DB 이름은 `jwt_research`로 맞춰야 합니다. 기존 MySQL 볼륨을 재사용할 때 `MYSQL_DATABASE` 변경만으로 DB가 새로 생성되지는 않습니다.
 
-```text
-E2 : Valid Token 100 requests
-     Revoked Token 100 requests
+3. `src/main/resources/application.yaml`의 `jwt.revocation.strategy`를 선택하고 **애플리케이션을 재시작**합니다.
 
-E3 : Revoked Token 100 requests
-```
+   ```yaml
+   jwt:
+     revocation:
+       strategy: db-fallback
+   ```
 
----
+   지원 값: `stateless`, `fail-open`, `fail-closed`, `db-fallback`, `db-verification`.
 
-## Metrics
+4. `/auth/login`으로 발급한 토큰을 `ACCESS_TOKEN` 등에 지정해 실험을 실행합니다. 로그인에는 DB에 등록된 사용자 계정이 필요합니다. 이 저장소에는 공개 데모 계정이나 초기 사용자 생성 스크립트가 제공되지 않으므로 테스트 계정은 별도로 준비해야 합니다.
 
-### RTAR
+   ```bash
+   curl -X POST http://localhost:8080/auth/login \
+     -H 'Content-Type: application/json' \
+     -d '{"email":"YOUR_TEST_EMAIL","password":"YOUR_TEST_PASSWORD"}'
+   ```
 
-Revoked Token Acceptance Rate
+   보호 API는 `GET /api/protected`, 폐기는 `POST /auth/logout` (`Authorization: Bearer <token>`)입니다.
 
-```text
-RTAR =
-Allowed Revoked Token Requests
-────────────────────────────── × 100
-Total Revoked Token Requests
-```
+## 실험 실행 및 원본 데이터
 
-낮을수록 폐기 토큰의 오허용이 적음을 의미합니다.
+- E1: `./experiments/k6/run-e1-stateless.sh 20` 또는 `./experiments/k6/run-e1-redis.sh 20` (50/100도 각각 실행)
+- E2: `./experiments/k6/run-e2.sh fail-open` (전략 변경·Redis 중단 등 사전 조건 별도 준비)
+- E3: `./experiments/k6/run-e3.sh db-verification` (MySQL 폐기 기록 유지, Redis 키 누락 상태 별도 준비)
+- E4: `./experiments/k6/run-e4-s3.sh 20` 또는 `./experiments/k6/run-e4-s4.sh 20` (50/100도 각각 실행)
 
-### VTSR
+E1/E4는 조건별 30초 × 5회, 20/50/100 VU, 5 VU·20초 Warm-up, 대기 30초입니다. E2/E3는 1 VU·100 iterations이며 E2는 반복마다 정상 토큰과 폐기 토큰을 각 1회 요청합니다.
 
-Valid Token Success Rate
+필요한 환경변수: E1/E4는 `ACCESS_TOKEN`, E2는 `VALID_TOKEN`·`REVOKED_TOKEN`, E3는 `REVOKED_TOKEN`. **실제 JWT를 커밋하거나 문서에 붙여 넣지 마세요.**
 
-```text
-VTSR =
-Successful Valid Token Requests
-─────────────────────────────── × 100
-Total Valid Token Requests
-```
+원본 결과: [`experiments/k6/results/`](experiments/k6/results/) · [실행 체크리스트](docs/experiment-checklist.md)
 
-높을수록 정상 사용자의 요청을 안정적으로 처리함을 의미합니다.
+> **k6 체크 해석 주의:** E2/E3의 `revoked token allowed`는 HTTP 200을 성공으로 검사합니다. 따라서 폐기 토큰이 정상 차단되면 해당 체크는 실패로 기록됩니다. 체크 실패율을 실험 실패율이나 보안 실패율로 그대로 해석하면 안 됩니다.
 
-성능 비교에는 다음 지표를 사용합니다.
+## 연구 범위와 한계
 
-- Average Latency
-- P95 Latency
-- Throughput
-- Error Rate
-- DB Query Count
+- 단일 로컬 머신·단일 Redis/MySQL 인스턴스에서의 통제된 실험입니다.
+- E2는 Redis 컨테이너 중단을, E3는 Redis의 폐기 키 누락을 모사했습니다. 네트워크 분할·복합 장애·실서비스 트래픽을 검증하지 않았습니다.
+- E2/E3는 각 전략당 100회 요청의 **인증 결과 관찰**이지 장애 발생 확률의 추정이 아닙니다.
+- DB Verification은 Redis 키가 누락된 상태에서 MySQL에 폐기 기록이 존재하는 경우를 검출하며, 모든 데이터 일관성 문제를 해결하는 것은 아닙니다.
+- 로그아웃의 MySQL/Redis 이중 기록은 원자적이지 않고 자동 복구·재동기화가 구현되지 않았습니다.
 
----
+## 문서
 
-## Tech Stack
-
-- Java 21
-- Spring Boot 4.1.1
-- Spring Security
-- JWT
-- Spring Data JPA
-- MySQL
-- Redis
-- Docker / Docker Compose
-- k6
-
----
-
-## Project Structure
-
-```text
-src/main/java/com/daeyeong/jwtrevocation/
-├── auth/
-├── security/
-├── revocation/
-│   └── strategy/
-├── user/
-└── api/
-
-experiments/k6/
-├── warm-up.js
-├── e1-performance.js
-├── run-e1-stateless.sh
-├── run-e1-redis.sh
-├── e2-availability.js
-├── run-e2.sh
-├── e3-consistency.js
-├── run-e3.sh
-├── e4-performance.js
-├── run-e4-s3.sh
-├── run-e4-s4.sh
-└── results/
-
-docs/
-├── research-design.md
-├── experiment-design.md
-├── experiment-checklist.md
-└── architecture.md
-```
-
----
-
-## Documentation
-
-연구 및 실험에 대한 자세한 내용은 `docs/`에서 확인할 수 있습니다.
-
-- `research-design.md` — 연구 목적, 연구 질문, 가설 및 평가 지표
-- `architecture.md` — 시스템 구조 및 폐기 검증 전략
-- `experiment-design.md` — E1~E4 실험 설계
-- `experiment-checklist.md` — 본 실험 실행 절차 및 체크리스트
-
----
-
-## Research Scope
-
-본 연구는 JWT **Access Token의 폐기 검증**에 집중합니다.
-
-다음 항목은 연구 범위에서 제외합니다.
-
-- 새로운 JWT 또는 암호 알고리즘 제안
-- Refresh Token 아키텍처 비교
-- Redis Cluster
-- Kubernetes
-- Kafka 기반 복구
-- Transactional Outbox
-- 분산 트랜잭션
-- 대규모 실제 운영 환경 재현
+- [연구 설계](docs/research-design.md) — 연구 질문·가설·평가 지표
+- [시스템 아키텍처](docs/architecture.md) — 실제 구현 흐름과 제한사항
+- [실험 설계](docs/experiment-design.md) — E1~E4 조건과 분석 방법
+- [실험 체크리스트](docs/experiment-checklist.md) — 실행 절차 및 상태 확인
+- [실험 결과](docs/experiment-results.md) — 최종 집계표·해석·원본 위치
